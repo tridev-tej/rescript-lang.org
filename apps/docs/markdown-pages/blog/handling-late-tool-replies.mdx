@@ -1,0 +1,93 @@
+---
+author: tejesh-vaish
+date: "2026-10-26"
+title: Handling late replies with ReScript records and events
+badge: community
+description: |
+  Match typed events against the current state and use immutable record updates
+  to handle deadlines, stale replies, and late completions in ReScript.
+---
+
+A product-title update can finish after the client stops waiting. If the final reply arrives late, the client still needs to decide whether it belongs to the current attempt and whether it can change the result.
+
+[Modeling uncertain outcomes with ReScript variants](./modeling-uncertain-tool-call-outcomes.mdx) gives us four states. `Pending` means we're waiting, and `Unresolved` means the deadline passed without a final reply. `Completed(string)` and `Rejected(string)` carry final results. Here those states live in a record alongside an attempt ID.
+
+## Typed events and a tuple match
+
+`signal` is a variant for the events we accept. A deadline has no payload, a completion carries output, and a rejection carries a reason. The `event` record pairs each signal with an attempt ID.
+
+`receive` checks that ID first, then matches the tuple `(call.status, event.signal)`. Each arm specifies the state and signal it accepts. A deadline moves only `Pending` to `Unresolved`. A matching final reply can settle either state.
+
+Assume replies have already been validated and authenticated, and every new attempt gets a fresh ID that is never reused. The types below describe events after that boundary.
+
+Open the example with the external-link icon on the ReScript tab and select stable [ReScript 12.3.1](https://github.com/rescript-lang/rescript/releases/tag/v12.3.1). Run it in the playground to compare with the Output tab.
+
+<CodeTab labels={["ReScript", "Output"]}>
+
+```res example
+type status =
+  | Pending
+  | Unresolved
+  | Completed(string)
+  | Rejected(string)
+
+type call = {attemptId: string, status: status}
+type signal = Deadline | CompletedReply(string) | RejectedReply(string)
+type event = {attemptId: string, signal: signal}
+
+let receive = (call: call, event) => {
+  if call.attemptId !== event.attemptId {
+    call
+  } else {
+    switch (call.status, event.signal) {
+    | (Pending, Deadline) => {...call, status: Unresolved}
+    | (Pending, CompletedReply(output))
+    | (Unresolved, CompletedReply(output)) => {...call, status: Completed(output)}
+    | (Pending, RejectedReply(reason))
+    | (Unresolved, RejectedReply(reason)) => {...call, status: Rejected(reason)}
+    | (Unresolved, Deadline)
+    | (Completed(_), _)
+    | (Rejected(_), _) => call
+    }
+  }
+}
+
+let describe = call =>
+  switch call.status {
+  | Pending => "Pending"
+  | Unresolved => "Unresolved"
+  | Completed(output) => "Completed: " + output
+  | Rejected(reason) => "Rejected: " + reason
+  }
+
+let pending = {attemptId: "title-1", status: Pending}
+let waiting = pending->receive({attemptId: "title-1", signal: Deadline})
+waiting->describe->Console.log
+let stale = waiting->receive({attemptId: "title-0", signal: CompletedReply("Old title")})
+stale->describe->Console.log
+let saved = stale->receive({attemptId: "title-1", signal: CompletedReply("Title saved")})
+saved->describe->Console.log
+saved->receive({attemptId: "title-1", signal: RejectedReply("Too late")})
+->describe->Console.log
+```
+
+```text
+Unresolved
+Unresolved
+Completed: Title saved
+Completed: Title saved
+```
+
+</CodeTab>
+
+## Record spread preserves earlier values
+
+ReScript [record fields](../docs/manual/record.mdx) are immutable by default. `{...call, status: Unresolved}` creates a new record with the same attempt ID and a different status. The earlier `pending` value stays `Pending`, even after `waiting` becomes `Unresolved`.
+
+The stale completion for `title-0` leaves `title-1` unresolved. The next completion matches `title-1` and settles it. The final rejection also matches, but the result stays completed because the terminal-state patterns return `call` unchanged. Repeated deadlines leave an unresolved attempt alone too.
+
+This is a first accepted final reply policy. It keeps `Completed` and `Rejected` terminal for this client, even if later replies conflict. Conflicting replies still need reconciliation outside this function.
+
+The tuple match covers every state and signal combination. In the last two patterns, `_` in the signal position matches any signal. That deliberately keeps later events from changing a final result.
+
+A local timeout can't establish that the write failed, was cancelled, or rolled back. It can't establish that retrying is safe either. Before retrying the title update, check whether the first write took effect and reconcile the result with the tool.

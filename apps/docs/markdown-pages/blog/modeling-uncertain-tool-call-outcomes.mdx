@@ -1,0 +1,69 @@
+---
+author: tejesh-vaish
+date: "2026-10-26"
+title: Modeling uncertain outcomes with ReScript variants
+badge: community
+description: |
+  Use payload-carrying variants and exhaustive pattern matching in ReScript
+  to keep a missing reply separate from a rejected update.
+---
+
+A seller approves a product-title update. The client sends the request, then its deadline expires before a final reply arrives. The title might already have changed, so showing "Failed" could invite a retry too early.
+
+I'd give that uncertainty its own ReScript constructor. In this hypothetical tool call, the client knows it stopped waiting but doesn't yet know the outcome.
+
+## Variants carry the data each state needs
+
+A [variant](../docs/manual/variant.mdx) gives the attempt four possible shapes. `Pending` means we're waiting. `Unresolved` means the client's deadline passed without a final reply. Neither needs a payload. `Completed(string)` carries the tool's output, and `Rejected(string)` carries the reason from a final refusal.
+
+The payload belongs to its constructor. When a match reaches `Completed(output)`, `output` is a string. There's no separate optional result field to keep in sync with a status flag. An empty output is still a completion.
+
+Open the example with the external-link icon on the ReScript tab and select stable [ReScript 12.3.1](https://github.com/rescript-lang/rescript/releases/tag/v12.3.1). Run it in the playground to compare with the Output tab.
+
+<CodeTab labels={["ReScript", "Output"]}>
+
+```res example
+type status =
+  | Pending
+  | Unresolved
+  | Completed(string)
+  | Rejected(string)
+
+let describe = status =>
+  switch status {
+  | Pending => "Pending"
+  | Unresolved => "Unresolved"
+  | Completed(output) => `Completed: "${output}"`
+  | Rejected(reason) => "Rejected: " + reason
+  }
+
+let outcomes = [
+  Pending,
+  Unresolved,
+  Completed("Title saved"),
+  Completed(""),
+  Rejected("Title too long"),
+]
+
+outcomes->Array.forEach(status => status->describe->Console.log)
+```
+
+```text
+Pending
+Unresolved
+Completed: "Title saved"
+Completed: ""
+Rejected: Title too long
+```
+
+</CodeTab>
+
+## Exhaustive matches keep the cases visible
+
+The constructors let ReScript infer that `describe` takes a `status`. [Pattern matching](../docs/manual/pattern-matching-destructuring.mdx) both selects the case and binds its payload. The four arms cover every constructor, so the match is exhaustive.
+
+If we add a constructor to `status`, ReScript reports the missing case in `describe` because there's no catch-all. Exhaustiveness checks apply to typed ReScript values. Incoming JSON still needs validation before it can become a `status`.
+
+A network error or a parse error doesn't establish a rejection. Neither does withheld approval. For the title update, `Unresolved` leaves room to check whether the write took effect before deciding whether to retry.
+
+[Handling late replies with typed events and records](./handling-late-tool-replies.mdx) adds the transitions, including a completion that arrives after the deadline.
